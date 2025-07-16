@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Optimized MaxK SpGEMM Function with Original Degree Normalization
-FUNCTION FILE - eliminates double TopK, keeps original post-SpGEMM normalization
+Optimized MaxK SpGEMM Function for Undirected Graphs
+Simplified version - removes out_degrees and transpose operations since graph is undirected
+Uses original degree normalization with pre-computed TopK
 """
 
 import torch
@@ -17,14 +18,14 @@ except ImportError as e:
 
 class MaxKSpGEMMFunction(Function):
     """
-    Optimized SpGEMM Function that accepts pre-computed TopK results
-    Uses original post-SpGEMM degree normalization (fast and simple)
+    Optimized SpGEMM Function for undirected graphs
+    Uses pre-computed TopK and original post-SpGEMM degree normalization
+    Simplified for undirected graphs (no transpose needed)
     """
     
     @staticmethod
     def forward(ctx, graph_indices, graph_values, topk_values, topk_indices, 
-                warp4_metadata, num_warps, graph_indptr, in_degrees, out_degrees,
-                graph_indices_T, graph_values_T):
+                warp4_metadata, num_warps, graph_indptr, degrees):
         """
         Forward pass with pre-computed TopK and original degree normalization
         
@@ -36,10 +37,7 @@ class MaxKSpGEMMFunction(Function):
             warp4_metadata: Warp metadata
             num_warps: Number of warps
             graph_indptr: CSR row pointers
-            in_degrees: In-degrees for post-SpGEMM normalization
-            out_degrees: Out-degrees for backward normalization
-            graph_indices_T: CSC indices for backward
-            graph_values_T: CSC values for backward
+            degrees: Node degrees for post-SpGEMM normalization (undirected: in_deg = out_deg)
         
         Returns:
             Normalized output
@@ -47,15 +45,13 @@ class MaxKSpGEMMFunction(Function):
         assert warp4_metadata is not None, "warp4_metadata REQUIRED"
         assert topk_values is not None, "topk_values REQUIRED" 
         assert topk_indices is not None, "topk_indices REQUIRED"
-        assert in_degrees is not None, "in_degrees REQUIRED for normalization"
+        assert degrees is not None, "degrees REQUIRED for normalization"
+        
         k_value = topk_values.size(1)
         sparse_selector = topk_indices.to(torch.uint8)
         
-        # Save for backward pass
-        ctx.save_for_backward(
-            graph_indices, graph_values, sparse_selector,
-            in_degrees, out_degrees, graph_indices_T, graph_values_T
-        )
+        # Save for backward pass (simplified for undirected graphs)
+        ctx.save_for_backward(graph_indices, graph_values, sparse_selector, degrees)
         ctx.k_value = k_value
         ctx.warp4_metadata = warp4_metadata
         ctx.num_warps = num_warps
@@ -73,29 +69,28 @@ class MaxKSpGEMMFunction(Function):
         )
         
         # Apply degree normalization AFTER SpGEMM (original method)
-        output_normalized = output_raw / in_degrees.unsqueeze(-1)
+        output_normalized = output_raw / degrees.unsqueeze(-1)
         
         return output_normalized
     
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Backward pass with original degree normalization
+        Backward pass for undirected graphs (no transpose needed)
         """
-        (graph_indices, graph_values, sparse_selector,
-         in_degrees, out_degrees, graph_indices_T, graph_values_T) = ctx.saved_tensors
+        (graph_indices, graph_values, sparse_selector, degrees) = ctx.saved_tensors
         k_value = ctx.k_value
         warp4_metadata = ctx.warp4_metadata
         num_warps = ctx.num_warps
         
         # Apply degree normalization to gradients first
-        grad_normalized = grad_output / in_degrees.unsqueeze(-1)
+        grad_normalized = grad_output / degrees.unsqueeze(-1)
         
-        # Backward SpGEMM
+        # Backward SpGEMM (for undirected graphs, use same structure)
         grad_sparse = maxk_cuda_kernels.spmm_maxk_backward(
             warp4_metadata,
-            graph_indices,
-            graph_values,  # Uniform weights for backward too
+            graph_indices,    # Same indices for undirected graphs
+            graph_values,     # Same values for undirected graphs
             grad_normalized,
             sparse_selector,
             num_warps,
@@ -103,13 +98,12 @@ class MaxKSpGEMMFunction(Function):
         )
         
         # Return gradients: (graph_indices, graph_values, topk_values, topk_indices, ...)
-        return (None, None, grad_sparse, None, None, None, None, None, None, None, None)
+        return (None, None, grad_sparse, None, None, None, None, None)
 
 def maxk_spgemm(graph_indices, graph_values, topk_values, topk_indices,
-                         warp4_metadata, num_warps, graph_indptr, in_degrees, out_degrees,
-                         graph_indices_T, graph_values_T):
+                warp4_metadata, num_warps, graph_indptr, degrees):
     """
-    Optimized MaxK SpGEMM with pre-computed TopK and original normalization
+    Optimized MaxK SpGEMM for undirected graphs
     
     Args:
         graph_indices: CSR indices
@@ -119,23 +113,19 @@ def maxk_spgemm(graph_indices, graph_values, topk_values, topk_indices,
         warp4_metadata: Warp metadata
         num_warps: Number of warps
         graph_indptr: CSR row pointers
-        in_degrees: In-degrees for normalization
-        out_degrees: Out-degrees for backward
-        graph_indices_T: CSC indices
-        graph_values_T: CSC values
+        degrees: Node degrees for normalization (undirected: in_deg = out_deg)
     
     Returns:
         Normalized output
     """
     return MaxKSpGEMMFunction.apply(
         graph_indices, graph_values, topk_values, topk_indices,
-        warp4_metadata, num_warps, graph_indptr, in_degrees, out_degrees,
-        graph_indices_T, graph_values_T
+        warp4_metadata, num_warps, graph_indptr, degrees
     )
 
 class MaxKSpmmWrapper:
     """
-    Wrapper that accepts pre-computed TopK but uses original degree normalization
+    Simplified wrapper for undirected graphs
     """
     
     def __init__(self, graph_name="", num_warps=12, warp_max_nz=64):
@@ -161,9 +151,9 @@ class MaxKSpmmWrapper:
         return True
     
     def spmm(self, graph_indices, graph_values, topk_values, topk_indices,
-             graph_indptr, in_degrees, out_degrees, graph_indices_T, graph_values_T):
+             graph_indptr, degrees):
         """
-        SpMM with pre-computed TopK and original degree normalization
+        SpMM for undirected graphs with pre-computed TopK
         
         Args:
             graph_indices: CSR indices
@@ -171,10 +161,7 @@ class MaxKSpmmWrapper:
             topk_values: Pre-computed TopK values
             topk_indices: Pre-computed TopK indices
             graph_indptr: CSR row pointers
-            in_degrees: In-degrees for normalization
-            out_degrees: Out-degrees for backward
-            graph_indices_T: CSC indices
-            graph_values_T: CSC values
+            degrees: Node degrees for normalization
         
         Returns:
             Normalized output
@@ -183,14 +170,13 @@ class MaxKSpmmWrapper:
         
         return maxk_spgemm(
             graph_indices, graph_values, topk_values, topk_indices,
-            self.warp4_metadata, self.num_warps, graph_indptr, 
-            in_degrees, out_degrees, graph_indices_T, graph_values_T
+            self.warp4_metadata, self.num_warps, graph_indptr, degrees
         )
 
 def test_optimized_spgemm_function():
-    """Test the optimized SpGEMM function"""
-    print("🧪 Testing Optimized SpGEMM Function (Original Normalization)")
-    print("=" * 60)
+    """Test the optimized SpGEMM function for undirected graphs"""
+    print("🧪 Testing Optimized SpGEMM Function (Undirected Graphs)")
+    print("=" * 55)
     
     assert torch.cuda.is_available(), "CUDA REQUIRED"
     
@@ -201,15 +187,12 @@ def test_optimized_spgemm_function():
     # Generate test graph data
     torch.manual_seed(42)
     csr_indices = torch.randint(0, V, (E,), device=device, dtype=torch.int32)
-    csc_indices = torch.randint(0, V, (E,), device=device, dtype=torch.int32)
     
     # Uniform weights (original method)
     csr_values = torch.ones(E, device=device, dtype=torch.float32)
-    csc_values = torch.ones(E, device=device, dtype=torch.float32)
     
-    # Degrees for normalization
-    in_degrees = torch.rand(V, device=device) * 10 + 1  # 1-11 range
-    out_degrees = torch.rand(V, device=device) * 10 + 1
+    # Degrees for normalization (undirected: in_deg = out_deg)
+    degrees = torch.rand(V, device=device) * 10 + 1  # 1-11 range
     
     # Pre-computed TopK (this is the optimization!)
     topk_values = torch.rand(V, k, device=device, dtype=torch.float32, requires_grad=True)
@@ -220,19 +203,18 @@ def test_optimized_spgemm_function():
     indptr = torch.arange(0, E+1, E//V, device=device, dtype=torch.int32)
     
     print(f"📊 Test data: {V} nodes, {E} edges, k={k}")
-    print(f"🔥 Key optimization: Using pre-computed TopK (no double computation)")
-    print(f"✅ Using original post-SpGEMM degree normalization (fast)")
+    print(f"🔥 Optimized for undirected graphs (no transpose operations)")
+    print(f"✅ Using original post-SpGEMM degree normalization")
     
     try:
         # Test forward pass
         output = maxk_spgemm(
             csr_indices, csr_values, topk_values, topk_indices,
-            warp4_metadata, 25, indptr, in_degrees, out_degrees,
-            csc_indices, csc_values
+            warp4_metadata, 25, indptr, degrees
         )
         
         print(f"✅ Forward pass: {output.shape}")
-        print(f"   Output normalized by in_degrees: range=[{output.min():.6f}, {output.max():.6f}]")
+        print(f"   Output normalized by degrees: range=[{output.min():.6f}, {output.max():.6f}]")
         
         # Test backward pass
         loss = output.sum()
@@ -240,16 +222,16 @@ def test_optimized_spgemm_function():
         
         assert topk_values.grad is not None, "No gradients computed"
         print(f"✅ Backward pass: {topk_values.grad.shape}")
-        print(f"   Gradients computed with out_degree normalization")
         
         print(f"🎉 Optimized SpGEMM Function Test PASSED!")
         
-        # Show the benefit
-        print(f"\n💡 Benefits of this approach:")
+        # Show the benefits
+        print(f"\n💡 Benefits for undirected graphs:")
         print(f"   ✅ Eliminates double TopK computation")
-        print(f"   ✅ Uses original fast degree normalization")
-        print(f"   ✅ No slow edge weight pre-computation")
-        print(f"   ✅ Simple and reliable")
+        print(f"   ✅ No transpose operations needed")
+        print(f"   ✅ Single degree array (in_deg = out_deg)")
+        print(f"   ✅ Simplified backward pass")
+        print(f"   ✅ Original fast degree normalization")
         
     except Exception as e:
         print(f"💀 FATAL ERROR in optimized function: {e}")
