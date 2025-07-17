@@ -1,0 +1,69 @@
+class GIN(nn.Module):
+    """Fixed GIN model - addresses missing apply_func that caused high loss"""
+    def __init__(self, in_size, hid_size, num_hid_layers, out_size, maxk=32, feat_drop=0.5, norm=False, nonlinear="maxk"):
+        super().__init__()
+        self.dropoutlayers = nn.ModuleList()
+        self.ginlayers = nn.ModuleList()
+        self.maxk = maxk
+        self.num_layers = num_hid_layers
+        self.norm_flag = norm
+        self.normlayers = nn.ModuleList()
+        self.nonlinear = nonlinear
+        
+        for i in range(self.num_layers):
+            self.dropoutlayers.append(nn.Dropout(feat_drop))
+            
+            # CRITICAL FIX: Create proper apply_func MLP for each GIN layer
+            apply_func = nn.Sequential(
+                nn.Linear(hid_size, hid_size),
+                nn.ReLU(),
+                nn.Linear(hid_size, hid_size)
+            )
+            
+            # Initialize apply_func weights
+            for layer in apply_func:
+                if isinstance(layer, nn.Linear):
+                    init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        init.zeros_(layer.bias)
+            
+            # FIXED: GINConv with proper apply_func (was None before!)
+            self.ginlayers.append(dglnn.GINConv(
+                apply_func=apply_func,
+                aggregator_type='sum',
+                init_eps=0,
+                learn_eps=True,
+                activation=None
+            ))
+            
+            if self.norm_flag:
+                self.normlayers.append(nn.LayerNorm(hid_size, elementwise_affine=True))
+        
+        # Input and output layers
+        self.lin_in = Linear(in_size, hid_size)
+        self.lin_out = Linear(hid_size, out_size)
+        init.xavier_uniform_(self.lin_in.weight)
+        init.xavier_uniform_(self.lin_out.weight)
+    
+    def forward(self, g, x):
+        x = self.lin_in(x).relu()
+        
+        for i in range(self.num_layers):
+            # Apply MaxK or ReLU activation
+            if self.nonlinear == 'maxk':
+                x = MaxK.apply(x, self.maxk)
+            elif self.nonlinear == 'relu':
+                x = F.relu(x)
+            
+            # Apply dropout
+            x = self.dropoutlayers[i](x)
+            
+            # GIN layer with proper apply_func
+            x = self.ginlayers[i](g, x)
+            
+            # Normalization
+            if self.norm_flag:
+                x = self.normlayers[i](x)
+        
+        x = self.lin_out(x)
+        return x
