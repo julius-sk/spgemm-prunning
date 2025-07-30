@@ -7,7 +7,7 @@
 set -e  # Exit on any error
 
 # Configuration
-DATASETS=("reddit" "flickr" "yelp" "ogbn-arxiv" "ogbn-products" "ogbn-proteins")
+DATASETS=("reddit" "flickr" "yelp" "ogbn-products" "ogbn-proteins")
 MODELS=("sage" "gcn" "gin")
 K_VALUES=(4 8 16 32 64 128 256)
 SEEDS=(42 97 123)  # Multiple seeds for statistical significance
@@ -61,7 +61,7 @@ COMMANDS:
     clean               Clean temporary files
     help                Show this help
 
-DATASETS: reddit,flickr,yelp,ogbn-arxiv,ogbn-products,ogbn-proteins
+DATASETS: reddit,flickr,yelp,ogbn-products,ogbn-proteins
 MODELS: sage,gcn,gin  
 K_VALUES: 4,8,16,32,64,128,256
 
@@ -222,10 +222,12 @@ estimate_memory() {
         "reddit") echo "16" ;; # GB
         "flickr") echo "8" ;;
         "yelp") echo "12" ;;
-        "ogbn-arxiv") echo "6" ;;
-        "ogbn-products") echo "24" ;;
-        "ogbn-proteins") echo "20" ;;
-        *) echo "16" ;;
+        "ogbn-products")
+            echo "24" ;;
+        "ogbn-proteins")
+            echo "20" ;;
+        *)
+            echo "16" ;;
     esac
 }
 
@@ -241,9 +243,6 @@ get_dataset_params() {
             echo "--hidden_dim 256 --num_layers 2 --lr 0.01 --dropout 0.5"
             ;;
         "yelp")
-            echo "--hidden_dim 256 --num_layers 3 --lr 0.01 --dropout 0.5"
-            ;;
-        "ogbn-arxiv")
             echo "--hidden_dim 256 --num_layers 3 --lr 0.01 --dropout 0.5"
             ;;
         "ogbn-products")
@@ -362,7 +361,7 @@ else
     exit_code=\$?
     echo "\$(date): ❌ Failed $experiment_id (exit code: \$exit_code)" >> "$log_file"
     
-    cat > "$result_file" << RESULT_EOF
+    cat > "$result_file" << 'RESULT_EOF'
 {
     "experiment_id": "$experiment_id",
     "dataset": "$dataset",
@@ -372,8 +371,8 @@ else
     "seed": $seed,
     "gpu": $gpu,
     "status": "failed",
-    "exit_code": \$exit_code,
-    "failed_at": "\$(date -Iseconds)",
+    "exit_code": $exit_code,
+    "failed_at": "$(date -Iseconds)",
     "log_file": "$log_file"
 }
 RESULT_EOF
