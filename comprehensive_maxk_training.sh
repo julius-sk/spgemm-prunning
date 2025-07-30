@@ -4,23 +4,14 @@ set -e
 DATASETS=(reddit flickr yelp ogbn-products ogbn-proteins)
 MODELS=(sage gcn gin)
 K_VALUES=(4 8 16 32 64 128 256)
-SEEDS=(42 97 123)
-
-get_params() {
-    case $1 in
-        reddit|flickr|yelp) echo "--hidden_dim 256 --num_layers 3 --lr 0.01 --dropout 0.5" ;;
-        ogbn-products) echo "--hidden_dim 256 --num_layers 3 --lr 0.003 --dropout 0.5" ;;
-        ogbn-proteins) echo "--hidden_dim 256 --num_layers 3 --lr 0.01 --dropout 0.1" ;;
-    esac
-}
 
 run_experiment() {
-    local dataset=$1 model=$2 k=$3 use_maxk=$4 seed=$5 gpu=${6:-0}
-    local exp_id="${dataset}_${model}_k${k}_maxk${use_maxk}_seed${seed}"
+    local dataset=$1 model=$2 k=$3 use_maxk=$4 gpu=${5:-0}
+    local exp_id="${dataset}_${model}_k${k}_maxk${use_maxk}"
     
-    mkdir -p logs results
+    mkdir -p logs
     
-    local cmd="python maxk_gnn_integrated.py --dataset $dataset --model $model --maxk $k --seed $seed --gpu $gpu --epochs 200 --patience 50 $(get_params $dataset)"
+    local cmd="python maxk_gnn_integrated.py --dataset $dataset --model $model --maxk $k --gpu $gpu"
     [[ "$use_maxk" == "true" ]] && cmd="$cmd --use_maxk_kernels"
     
     export CUDA_VISIBLE_DEVICES=$gpu
@@ -33,13 +24,11 @@ run_all() {
     for dataset in "${DATASETS[@]}"; do
         for model in "${MODELS[@]}"; do
             for k in "${K_VALUES[@]}"; do
-                for seed in "${SEEDS[@]}"; do
-                    # Baseline
-                    run_experiment "$dataset" "$model" "$k" "false" "$seed" 0
-                    
-                    # MaxK if available
-                    [[ "$kernels_available" == "true" ]] && run_experiment "$dataset" "$model" "$k" "true" "$seed" 0
-                done
+                # Baseline
+                run_experiment "$dataset" "$model" "$k" "false" 0
+                
+                # MaxK if available
+                [[ "$kernels_available" == "true" ]] && run_experiment "$dataset" "$model" "$k" "true" 0
             done
         done
     done
@@ -56,10 +45,8 @@ run_subset() {
     for d in "${DS[@]}"; do
         for m in "${MS[@]}"; do
             for k in "${KS[@]}"; do
-                for seed in "${SEEDS[@]}"; do
-                    run_experiment "$d" "$m" "$k" "false" "$seed" 0
-                    [[ "$kernels_available" == "true" ]] && run_experiment "$d" "$m" "$k" "true" "$seed" 0
-                done
+                run_experiment "$d" "$m" "$k" "false" 0
+                [[ "$kernels_available" == "true" ]] && run_experiment "$d" "$m" "$k" "true" 0
             done
         done
     done
