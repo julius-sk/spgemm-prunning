@@ -69,7 +69,7 @@ CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim, float s
     
     // Calculate expected number of non-zeros
     long long total_elements = (long long)n_nodes * feature_dim;
-    long long nnz = (long long)(total_elements * (1.0f - sparsity));
+    long long nnz = (long long)(total_elements * sparsity);  // sparsity is nnz ratio
     
     std::vector<IT> row_ptr(n_nodes + 1, 0);
     std::vector<IT> col_ids;
@@ -88,7 +88,7 @@ CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim, float s
         int row_nnz = 0;
         
         for (int j = 0; j < feature_dim; j++) {
-            if (sparse_dist(gen) < sparsity) {
+            if (sparse_dist(gen) < (1.0f - sparsity)) {  // sparsity is nnz ratio, so (1-sparsity) is zero ratio
                 col_ids.push_back(j);
                 values.push_back(val_dist(gen));
                 row_nnz++;
@@ -403,7 +403,7 @@ void run_spgemm_benchmark(const std::string& dataset_name, const std::string& da
     std::cout << "Graph loaded: " << adj.nrow << " nodes, " << adj.nnz << " edges" << std::endl;
     
     // Test with different sparsities and feature dimension 256
-    std::vector<float> sparsities = {0.5f, 0.25f, 0.125f, 0.0625f};
+    std::vector<float> sparsities = {0.5f, 0.25f, 0.125f, 0.0625f};  // These are nnz ratios
     int feature_dim = 256;
     
     for (float sparsity : sparsities) {
@@ -447,7 +447,7 @@ int main(int argc, char *argv[]) {
     
     std::cout << "SpGEMM Performance Comparison: Hash vs cuSPARSE (Modern API)" << std::endl;
     std::cout << "Feature matrix dimension: 256" << std::endl;
-    std::cout << "Sparsity levels: 0.5, 0.25, 0.125, 0.0625" << std::endl;
+    std::cout << "Sparsity levels (nnz ratios): 0.5, 0.25, 0.125, 0.0625" << std::endl;
     std::cout << "Loading graphs from .indices/.indptr format" << std::endl;
     
     for (const std::string& dataset : datasets) {
