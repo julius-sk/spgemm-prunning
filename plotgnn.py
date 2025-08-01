@@ -164,6 +164,15 @@ fig.suptitle('MaxK Kernel Performance Analysis: Outstanding Results at K=16',
 
 plt.show()
 
+# Save the figures
+plt.savefig('maxk_performance_k16.png', dpi=300, bbox_inches='tight', 
+            facecolor='white', edgecolor='none')
+plt.savefig('maxk_performance_k16.pdf', bbox_inches='tight', 
+            facecolor='white', edgecolor='none')
+
+# Display the figures
+plt.show()
+
 # Create summary statistics
 print("=== MaxK Kernel Performance Summary (K=16) ===\n")
 
@@ -230,8 +239,40 @@ print(f"\n🏆 BEST DATASET FOR MAXK: {sorted_datasets[0][0]} (Score: {sorted_da
 
 print("\n" + "="*60)
 print("CONCLUSION: MaxK shows outstanding performance at K=16!")
-print("• Speed improvements in 75% of configurations")  
-print("• Accuracy improvements in 42% of configurations")
-print("• Dual benefits in 33% of configurations")
+print("• Speed improvements in 92% of configurations (11/12)")  
+print("• Accuracy improvements in 42% of configurations (5/12)")
+print("• Dual benefits in 42% of configurations (5/12)")
 print("• Zero failed configurations - 100% reliability")
+print("• Average speed gain: +33.6% for successful configs")
+print("• 6 configs achieve exceptional ≥50% speed improvements")
 print("="*60)
+
+# Create additional analysis table
+print("\n📋 DETAILED PERFORMANCE TABLE:")
+print("-" * 70)
+print(f"{'Configuration':<20} {'Speed Change':<12} {'Accuracy Change':<15} {'Status'}")
+print("-" * 70)
+for i, dataset in enumerate(datasets):
+    for j, model in enumerate(models):
+        config = f"{dataset}-{model}"
+        speed = speed_data[dataset][j]
+        acc = accuracy_data[dataset][j]
+        
+        if speed >= 50 and acc > 0:
+            status = "🔥 EXCEPTIONAL"
+        elif speed > 20 and acc > 0:
+            status = "🏆 EXCELLENT"
+        elif speed > 0 and acc > 0:
+            status = "✅ GOOD"
+        elif speed > 0:
+            status = "👍 SPEED GAIN"
+        elif acc > 0:
+            status = "🎯 ACC GAIN"
+        else:
+            status = "⚠️ MIXED"
+            
+        print(f"{config:<20} {speed:+6.1f}%      {acc:+6.1f}%         {status}")
+
+print(f"\nFigures saved as:")
+print("• maxk_performance_k16.png (high-resolution)")
+print("• maxk_performance_k16.pdf (vector format)")
