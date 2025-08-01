@@ -412,6 +412,7 @@ void run_spgemm_benchmark(const std::string& dataset_name, const std::string& da
         
         // Generate sparse feature matrix
         CSR<IT, VT> features = generate_sparse_feature_matrix(adj.nrow, feature_dim, sparsity);
+        std::cout << "Adjacency matrix: " << adj.nrow << "x" << adj.ncolumn << ", nnz=" << adj.nnz << std::endl;
         std::cout << "Feature matrix: " << features.nrow << "x" << features.ncolumn 
                   << ", nnz=" << features.nnz << std::endl;
         
