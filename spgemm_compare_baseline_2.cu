@@ -11,6 +11,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <set>
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -203,6 +204,7 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
                                                        &alpha, matA, matB, &beta, matC,
                                                        computeType, CUSPARSE_SPGEMM_DEFAULT,
                                                        spgemmDesc, &bufferSize1, NULL) );
+    printf("cuSPARSE buffer1 size: %.2f GB\n", (float)bufferSize1 / (1024*1024*1024));
     CHECK_CUDA_FUNC( cudaMalloc((void**)&dBuffer1, bufferSize1) );
     
     CHECK_CUSPARSE_FUNC( cusparseSpGEMM_workEstimation(handle, opA, opB,
@@ -215,6 +217,7 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
                                                 &alpha, matA, matB, &beta, matC,
                                                 computeType, CUSPARSE_SPGEMM_DEFAULT,
                                                 spgemmDesc, &bufferSize2, NULL) );
+    printf("cuSPARSE buffer2 size: %.2f GB\n", (float)bufferSize2 / (1024*1024*1024));
     CHECK_CUDA_FUNC( cudaMalloc(&dBuffer2, bufferSize2) );
     
     CHECK_CUSPARSE_FUNC( cusparseSpGEMM_compute(handle, opA, opB,
