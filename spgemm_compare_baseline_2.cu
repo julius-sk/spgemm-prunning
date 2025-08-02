@@ -24,24 +24,24 @@
 // Include our additional headers
 #include "graph_loader.hpp"
 
-// Modern cuSPARSE error checking macros (from spgemm_rd.cu)
-#define CHECK_CUDA(func)                                                       \
+// Error checking macros for functions (modified to not exit)
+#define CHECK_CUDA_FUNC(func)                                                  \
 {                                                                              \
     cudaError_t status = (func);                                               \
     if (status != cudaSuccess) {                                               \
         printf("CUDA API failed at line %d with error: %s (%d)\n",             \
                __LINE__, cudaGetErrorString(status), status);                  \
-        return EXIT_FAILURE;                                                   \
+        result.total_time_ms = -1; return result;                              \
     }                                                                          \
 }
 
-#define CHECK_CUSPARSE(func)                                                   \
+#define CHECK_CUSPARSE_FUNC(func)                                             \
 {                                                                              \
     cusparseStatus_t status = (func);                                          \
     if (status != CUSPARSE_STATUS_SUCCESS) {                                   \
         printf("CUSPARSE API failed at line %d with error: %s (%d)\n",         \
                __LINE__, cusparseGetErrorString(status), status);              \
-        return EXIT_FAILURE;                                                   \
+        result.total_time_ms = -1; return result;                              \
     }                                                                          \
 }
 
@@ -63,9 +63,12 @@ struct PerformanceResult {
     int feature_dim;
 };
 
-// Generate random sparse feature matrix with specified dimensions
-CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim) {
+// Generate random sparse feature matrix with specified sparsity
+CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, float sparsity) {
     CSR<IT, VT> features;
+    
+    int feature_dim = 256;  // Always 256 columns
+    int target_nnz = (int)(n_nodes * feature_dim * sparsity);  // Target nnz based on sparsity
     
     std::vector<IT> row_ptr(n_nodes + 1, 0);
     std::vector<IT> col_ids;
@@ -73,24 +76,38 @@ CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim) {
     
     std::random_device rd;
     std::mt19937 gen(rd());
+    std::uniform_int_distribution<> col_dist(0, feature_dim - 1);
     std::uniform_real_distribution<VT> val_dist(-1.0, 1.0);
     
-    // Generate dense feature matrix (all elements are non-zero)
-    long long total_nnz = (long long)n_nodes * feature_dim;
-    col_ids.reserve(total_nnz);
-    values.reserve(total_nnz);
+    col_ids.reserve(target_nnz);
+    values.reserve(target_nnz);
+    
+    // Distribute non-zeros across rows
+    int nnz_per_row = target_nnz / n_nodes;
+    int remaining_nnz = target_nnz % n_nodes;
     
     for (int i = 0; i < n_nodes; i++) {
-        for (int j = 0; j < feature_dim; j++) {
-            col_ids.push_back(j);
+        int row_nnz = nnz_per_row;
+        if (i < remaining_nnz) row_nnz++;  // Distribute remainder
+        
+        // Generate random column indices for this row (avoid duplicates)
+        std::set<int> selected_cols;
+        while (selected_cols.size() < row_nnz && selected_cols.size() < feature_dim) {
+            selected_cols.insert(col_dist(gen));
+        }
+        
+        // Add the selected columns
+        for (int col : selected_cols) {
+            col_ids.push_back(col);
             values.push_back(val_dist(gen));
         }
-        row_ptr[i + 1] = row_ptr[i] + feature_dim;
+        
+        row_ptr[i + 1] = col_ids.size();
     }
     
     // Initialize CSR structure
     features.nrow = n_nodes;
-    features.ncolumn = feature_dim;
+    features.ncolumn = feature_dim;  // Always 256
     features.nnz = col_ids.size();
     features.host_malloc = true;
     features.device_malloc = false;
@@ -145,35 +162,35 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
     void *dBuffer1 = NULL, *dBuffer2 = NULL;
     size_t bufferSize1 = 0, bufferSize2 = 0;
     
-    cusparseCreate(&handle);
+    CHECK_CUSPARSE_FUNC( cusparseCreate(&handle) );
     
     // Create sparse matrix A (adjacency) in CSR format
-    cusparseCreateCsr(&matA, adj.nrow, adj.ncolumn, adj.nnz,
-                      adj.d_rpt, adj.d_colids, adj.d_values,
-                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                      CUSPARSE_INDEX_BASE_ZERO, 
-                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    CHECK_CUSPARSE_FUNC( cusparseCreateCsr(&matA, adj.nrow, adj.ncolumn, adj.nnz,
+                                           adj.d_rpt, adj.d_colids, adj.d_values,
+                                           CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                           CUSPARSE_INDEX_BASE_ZERO, 
+                                           std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F) );
     
     // Create sparse matrix B (features) in CSR format  
-    cusparseCreateCsr(&matB, features.nrow, features.ncolumn, features.nnz,
-                      features.d_rpt, features.d_colids, features.d_values,
-                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                      CUSPARSE_INDEX_BASE_ZERO,
-                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    CHECK_CUSPARSE_FUNC( cusparseCreateCsr(&matB, features.nrow, features.ncolumn, features.nnz,
+                                           features.d_rpt, features.d_colids, features.d_values,
+                                           CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                           CUSPARSE_INDEX_BASE_ZERO,
+                                           std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F) );
     
     // Allocate C row pointers
-    cudaMalloc((void**)&dC_csrOffsets, (adj.nrow + 1) * sizeof(int));
+    CHECK_CUDA_FUNC( cudaMalloc((void**)&dC_csrOffsets, (adj.nrow + 1) * sizeof(int)) );
     
     // Create sparse matrix C for the result (A * B)
-    cusparseCreateCsr(&matC, adj.nrow, features.ncolumn, 0,
-                      dC_csrOffsets, NULL, NULL,
-                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                      CUSPARSE_INDEX_BASE_ZERO,
-                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    CHECK_CUSPARSE_FUNC( cusparseCreateCsr(&matC, adj.nrow, features.ncolumn, 0,
+                                           dC_csrOffsets, NULL, NULL,
+                                           CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                           CUSPARSE_INDEX_BASE_ZERO,
+                                           std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F) );
     
     // SpGEMM Computation (A * B, where A=adj, B=features)
     cusparseSpGEMMDescr_t spgemmDesc;
-    cusparseSpGEMM_createDescr(&spgemmDesc);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_createDescr(&spgemmDesc) );
     
     // Set up SpGEMM parameters
     VT alpha = 1.0, beta = 0.0;
@@ -182,46 +199,46 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
     cudaDataType computeType = std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F;
     
     // SpGEMM work estimation
-    cusparseSpGEMM_workEstimation(handle, opA, opB,
-                                  &alpha, matA, matB, &beta, matC,
-                                  computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                  spgemmDesc, &bufferSize1, NULL);
-    cudaMalloc((void**)&dBuffer1, bufferSize1);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_workEstimation(handle, opA, opB,
+                                                       &alpha, matA, matB, &beta, matC,
+                                                       computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                                       spgemmDesc, &bufferSize1, NULL) );
+    CHECK_CUDA_FUNC( cudaMalloc((void**)&dBuffer1, bufferSize1) );
     
-    cusparseSpGEMM_workEstimation(handle, opA, opB,
-                                  &alpha, matA, matB, &beta, matC,
-                                  computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                  spgemmDesc, &bufferSize1, dBuffer1);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_workEstimation(handle, opA, opB,
+                                                       &alpha, matA, matB, &beta, matC,
+                                                       computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                                       spgemmDesc, &bufferSize1, dBuffer1) );
     
     // SpGEMM compute
-    cusparseSpGEMM_compute(handle, opA, opB,
-                           &alpha, matA, matB, &beta, matC,
-                           computeType, CUSPARSE_SPGEMM_DEFAULT,
-                           spgemmDesc, &bufferSize2, NULL);
-    cudaMalloc(&dBuffer2, bufferSize2);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_compute(handle, opA, opB,
+                                                &alpha, matA, matB, &beta, matC,
+                                                computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                                spgemmDesc, &bufferSize2, NULL) );
+    CHECK_CUDA_FUNC( cudaMalloc(&dBuffer2, bufferSize2) );
     
-    cusparseSpGEMM_compute(handle, opA, opB,
-                           &alpha, matA, matB, &beta, matC,
-                           computeType, CUSPARSE_SPGEMM_DEFAULT,
-                           spgemmDesc, &bufferSize2, dBuffer2);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_compute(handle, opA, opB,
+                                                &alpha, matA, matB, &beta, matC,
+                                                computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                                spgemmDesc, &bufferSize2, dBuffer2) );
     
     // Get matrix C non-zero entries
     int64_t C_num_rows1, C_num_cols1, C_nnz1;
-    cusparseSpMatGetSize(matC, &C_num_rows1, &C_num_cols1, &C_nnz1);
+    CHECK_CUSPARSE_FUNC( cusparseSpMatGetSize(matC, &C_num_rows1, &C_num_cols1, &C_nnz1) );
     
     printf("cuSPARSE result: %ld x %ld, nnz = %ld\n", C_num_rows1, C_num_cols1, C_nnz1);
     
     // Allocate matrix C
-    cudaMalloc((void**)&dC_columns, C_nnz1 * sizeof(int));
-    cudaMalloc((void**)&dC_values, C_nnz1 * sizeof(VT));
+    CHECK_CUDA_FUNC( cudaMalloc((void**)&dC_columns, C_nnz1 * sizeof(int)) );
+    CHECK_CUDA_FUNC( cudaMalloc((void**)&dC_values, C_nnz1 * sizeof(VT)) );
     
     // Update matC with the new pointers
-    cusparseCsrSetPointers(matC, dC_csrOffsets, dC_columns, dC_values);
+    CHECK_CUSPARSE_FUNC( cusparseCsrSetPointers(matC, dC_csrOffsets, dC_columns, dC_values) );
     
     // Copy the final products to the matrix C
-    cusparseSpGEMM_copy(handle, opA, opB,
-                        &alpha, matA, matB, &beta, matC,
-                        computeType, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_copy(handle, opA, opB,
+                                             &alpha, matA, matB, &beta, matC,
+                                             computeType, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc) );
     
     // Stop timing
     cudaEventRecord(stop);
@@ -236,28 +253,28 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
     result.gflops = (float)(flop_count) / 1000 / 1000 / msec;
     
     // Clean up SpGEMM resources
-    cusparseSpGEMM_destroyDescr(spgemmDesc);
-    cusparseDestroySpMat(matA);
-    cusparseDestroySpMat(matB);
-    cusparseDestroySpMat(matC);
-    cusparseDestroy(handle);
+    CHECK_CUSPARSE_FUNC( cusparseSpGEMM_destroyDescr(spgemmDesc) );
+    CHECK_CUSPARSE_FUNC( cusparseDestroySpMat(matA) );
+    CHECK_CUSPARSE_FUNC( cusparseDestroySpMat(matB) );
+    CHECK_CUSPARSE_FUNC( cusparseDestroySpMat(matC) );
+    CHECK_CUSPARSE_FUNC( cusparseDestroy(handle) );
     
     // Free buffers
-    cudaFree(dBuffer1);
-    cudaFree(dBuffer2);
+    CHECK_CUDA_FUNC( cudaFree(dBuffer1) );
+    CHECK_CUDA_FUNC( cudaFree(dBuffer2) );
     
     // Clean up
     adj.release_csr();
     features.release_csr();
     
     // Free result
-    cudaFree(dC_csrOffsets);
-    cudaFree(dC_columns); 
-    cudaFree(dC_values);
+    CHECK_CUDA_FUNC( cudaFree(dC_csrOffsets) );
+    CHECK_CUDA_FUNC( cudaFree(dC_columns) );
+    CHECK_CUDA_FUNC( cudaFree(dC_values) );
     
     // Destroy CUDA events
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    CHECK_CUDA_FUNC( cudaEventDestroy(start) );
+    CHECK_CUDA_FUNC( cudaEventDestroy(stop) );
     
     return result;
 }
@@ -274,7 +291,7 @@ PerformanceResult test_spgemm_hash_old(CSR<IT, VT> adj, CSR<IT, VT> features,
     IT i;
     long long int flop_count;
     cudaEvent_t event[2];
-    float msec, ave_msec;
+    float msec;
     
     for (i = 0; i < 2; i++) {
         cudaEventCreate(&(event[i]));
@@ -366,20 +383,18 @@ void run_spgemm_benchmark(const std::string& dataset_name, const std::string& da
     
     std::cout << "Graph loaded: " << adj.nrow << " nodes, " << adj.nnz << " edges" << std::endl;
     
-    // Test with different sparsities - feature matrix dimensions will be n × (sparsity × 256)
+    // Test with different sparsities - feature matrix is always n × 256 with varying sparsity
     std::vector<float> sparsities = {0.5f, 0.25f, 0.125f, 0.0625f};
-    int base_feature_dim = 256;
     
     for (float sparsity : sparsities) {
-        int actual_feature_dim = (int)(sparsity * base_feature_dim);
-        std::cout << "\n--- Testing sparsity: " << sparsity << " (feature dim: " << actual_feature_dim << ") ---" << std::endl;
+        std::cout << "\n--- Testing sparsity: " << sparsity << " ---" << std::endl;
         print_results_header();
         
-        // Generate feature matrix with dimensions n × (sparsity × 256)
-        CSR<IT, VT> features = generate_sparse_feature_matrix(adj.nrow, actual_feature_dim);
+        // Generate sparse feature matrix: n × 256 with nnz = n × 256 × sparsity
+        CSR<IT, VT> features = generate_sparse_feature_matrix(adj.nrow, sparsity);
         std::cout << "Adjacency matrix: " << adj.nrow << "x" << adj.ncolumn << ", nnz=" << adj.nnz << std::endl;
         std::cout << "Feature matrix: " << features.nrow << "x" << features.ncolumn 
-                  << ", nnz=" << features.nnz << std::endl;
+                  << ", nnz=" << features.nnz << " (target: " << (int)(adj.nrow * 256 * sparsity) << ")" << std::endl;
         
         // Test both implementations
         
@@ -415,7 +430,8 @@ int main(int argc, char *argv[]) {
     std::vector<std::string> datasets = {"reddit", "flickr", "yelp", "products", "proteins"};
     
     std::cout << "SpGEMM Performance Comparison: Hash vs cuSPARSE (Modern API)" << std::endl;
-    std::cout << "Feature matrix dimensions: n × (sparsity × 256)" << std::endl;
+    std::cout << "Feature matrix dimensions: n × 256 (sparse)" << std::endl;
+    std::cout << "Feature matrix nnz: n × 256 × sparsity" << std::endl;
     std::cout << "Sparsity levels: 0.5, 0.25, 0.125, 0.0625" << std::endl;
     std::cout << "Loading graphs from .indices/.indptr format" << std::endl;
     
