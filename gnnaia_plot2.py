@@ -23,97 +23,78 @@ df = pd.DataFrame(data)
 df['AIA_Improvement'] = ((df['CuSparse'] - df['With_AIA']) / df['CuSparse']) * 100
 df['NoAIA_Improvement'] = ((df['CuSparse'] - df['Without_AIA']) / df['CuSparse']) * 100
 
-# Set up the plot
-fig, ax = plt.subplots(figsize=(14, 8))
+# Set up the plot with larger figure size
+fig, ax = plt.subplots(figsize=(16, 10))
 
 # Define colors
 colors = ['#3498db', '#2ecc71']  # Blue for Without AIA, Green for With AIA
 labels = ['Without AIA vs CuSparse', 'With AIA vs CuSparse']
 
 # Create x positions for bars
-datasets = ['Reddit', 'Protein', 'Flickr', 'Yelp']
-models = ['GCN', 'GIN', 'SAGE']
-n_datasets = len(datasets)
-n_models = len(models)
-n_conditions = 2  # Only two comparisons now
+n_configs = len(df)  # 12 configurations
+bar_width = 0.35     # Larger bar width
+x_positions = np.arange(n_configs)
 
-# Width of bars and spacing
-bar_width = 0.12
-group_spacing = 0.4
-dataset_spacing = 1.0
+# Create the two sets of bars
+bars1 = ax.bar(x_positions - bar_width/2, df['NoAIA_Improvement'], bar_width, 
+               color=colors[0], alpha=0.8, edgecolor='black', linewidth=1,
+               label=labels[0])
 
-# Calculate x positions
-x_positions = []
-labels_positions = []
-dataset_labels = []
+bars2 = ax.bar(x_positions + bar_width/2, df['AIA_Improvement'], bar_width,
+               color=colors[1], alpha=0.8, edgecolor='black', linewidth=1,
+               label=labels[1])
 
-for i, dataset in enumerate(datasets):
-    dataset_start = i * (n_models * n_conditions * bar_width + group_spacing + dataset_spacing)
-    
-    for j, model in enumerate(models):
-        model_start = dataset_start + j * (n_conditions * bar_width + group_spacing)
-        
-        # Store center position for model label
-        model_center = model_start + (n_conditions * bar_width) / 2
-        labels_positions.append(model_center)
-        dataset_labels.append(f'{dataset}\n{model}')
-        
-        for k in range(n_conditions):
-            x_pos = model_start + k * bar_width
-            x_positions.append(x_pos)
+# Add value labels on top of bars with larger font
+for bars, values in [(bars1, df['NoAIA_Improvement']), (bars2, df['AIA_Improvement'])]:
+    for bar, value in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
+               f'{value:.1f}%', ha='center', va='bottom', 
+               fontsize=12, fontweight='bold')
 
-# Prepare data for plotting
-x_pos_idx = 0
-for i, dataset in enumerate(datasets):
-    for j, model in enumerate(models):
-        row = df[(df['Dataset'] == dataset) & (df['Model'] == model)]
-        
-        values = [row['NoAIA_Improvement'].iloc[0], row['AIA_Improvement'].iloc[0]]
-        
-        for k, (value, color, label) in enumerate(zip(values, colors, labels)):
-            x_pos = x_positions[x_pos_idx + k]
-            bar = ax.bar(x_pos, value, bar_width, color=color, 
-                        label=label if i == 0 and j == 0 else "", 
-                        alpha=0.8, edgecolor='black', linewidth=0.5)
-            
-            # Add value labels on top of bars
-            ax.text(x_pos, value + 1, f'{value:.1f}%', 
-                   ha='center', va='bottom', fontsize=9, fontweight='bold')
-        
-        x_pos_idx += n_conditions
-
-# Customize the plot
-ax.set_ylabel('Performance Improvement over CuSparse (%)', fontsize=12, fontweight='bold')
-ax.set_xlabel('Dataset and Model', fontsize=12, fontweight='bold')
+# Customize the plot with larger fonts
+ax.set_ylabel('Performance Improvement over CuSparse (%)', fontsize=16, fontweight='bold')
+ax.set_xlabel('Dataset and Model Configuration', fontsize=16, fontweight='bold')
 ax.set_title('GNN Performance Improvement Percentage over CuSparse\n(Higher values indicate better performance)', 
-             fontsize=14, fontweight='bold', pad=20)
+             fontsize=18, fontweight='bold', pad=25)
 
-# Set x-axis labels
-ax.set_xticks(labels_positions)
-ax.set_xticklabels(dataset_labels, fontsize=10)
+# Create x-axis labels
+x_labels = [f'{row["Dataset"]}\n{row["Model"]}' for _, row in df.iterrows()]
+ax.set_xticks(x_positions)
+ax.set_xticklabels(x_labels, fontsize=12, fontweight='bold')
 
-# Add legend
-ax.legend(loc='upper left', fontsize=11, framealpha=0.9)
+# Add legend with larger font
+ax.legend(loc='upper left', fontsize=14, framealpha=0.9)
 
 # Add grid for better readability
 ax.grid(True, axis='y', alpha=0.3, linestyle='--')
 
-# Set y-axis limits
+# Set y-axis limits with more space
 max_improvement = max(df['AIA_Improvement'].max(), df['NoAIA_Improvement'].max())
-ax.set_ylim(0, max_improvement * 1.15)
+ax.set_ylim(0, max_improvement * 1.2)
 
 # Add horizontal line at 0% for reference
 ax.axhline(y=0, color='black', linestyle='-', alpha=0.8, linewidth=1)
 
-# Add vertical lines to separate datasets
-for i in range(1, len(datasets)):
-    sep_x = (labels_positions[(i-1)*3 + 2] + labels_positions[i*3]) / 2
-    ax.axvline(x=sep_x, color='gray', linestyle='-', alpha=0.5, linewidth=1)
+# Add vertical lines to separate datasets (after every 3 configurations)
+for i in [2.5, 5.5, 8.5]:
+    ax.axvline(x=i, color='gray', linestyle='-', alpha=0.7, linewidth=2)
+
+# Add dataset group labels at the top
+dataset_centers = [1, 4, 7, 10]  # Center of each group of 3
+dataset_names = ['Reddit', 'Protein', 'Flickr', 'Yelp']
+for center, name in zip(dataset_centers, dataset_names):
+    ax.text(center, max_improvement * 1.15, name, ha='center', va='center',
+            fontsize=16, fontweight='bold', 
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.8))
+
+# Increase tick label sizes
+ax.tick_params(axis='x', labelsize=12)
+ax.tick_params(axis='y', labelsize=12)
 
 # Improve layout
 plt.tight_layout()
 
-# Add performance summary text box
+# Add performance summary text box with larger font
 summary_stats = f"""Performance Summary:
 • AIA shows 20-60% improvement over CuSparse
 • Without AIA shows 10-50% improvement over CuSparse
@@ -121,7 +102,7 @@ summary_stats = f"""Performance Summary:
 • Consistent benefits across all configurations
 • AIA provides additional 5-15% boost over baseline"""
 
-ax.text(0.02, 0.98, summary_stats, transform=ax.transAxes, fontsize=9,
+ax.text(0.02, 0.98, summary_stats, transform=ax.transAxes, fontsize=12,
         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
 # Show the plot
@@ -129,57 +110,19 @@ plt.show()
 
 # Print detailed comparison table
 print("\nDetailed Improvement Percentage Analysis:")
-print("="*90)
+print("="*100)
 print(f"{'Dataset':<10} {'Model':<6} {'Without AIA':<15} {'With AIA':<12} {'AIA Advantage':<15}")
 print(f"{'':^10} {'':^6} {'vs CuSparse (%)':<15} {'vs CuSparse (%)':<12} {'over Baseline (%)':<15}")
-print("="*90)
+print("="*100)
 
 for _, row in df.iterrows():
     aia_advantage = row['AIA_Improvement'] - row['NoAIA_Improvement']
     print(f"{row['Dataset']:<10} {row['Model']:<6} {row['NoAIA_Improvement']:<15.1f} "
           f"{row['AIA_Improvement']:<12.1f} {aia_advantage:<15.1f}")
 
-print("\n" + "="*90)
+print("\n" + "="*100)
 print("Summary Statistics:")
 print(f"Average improvement without AIA: {df['NoAIA_Improvement'].mean():.1f}%")
 print(f"Average improvement with AIA: {df['AIA_Improvement'].mean():.1f}%")
 print(f"Average additional benefit from AIA: {(df['AIA_Improvement'] - df['NoAIA_Improvement']).mean():.1f}%")
 print(f"Best performing configuration: {df.loc[df['AIA_Improvement'].idxmax(), 'Dataset']} {df.loc[df['AIA_Improvement'].idxmax(), 'Model']} with {df['AIA_Improvement'].max():.1f}% improvement")
-
-# Create a secondary plot showing the additional benefit of AIA over baseline
-fig2, ax2 = plt.subplots(figsize=(12, 6))
-
-# Calculate additional benefit of AIA over baseline (Without AIA)
-df['AIA_Additional_Benefit'] = df['AIA_Improvement'] - df['NoAIA_Improvement']
-
-# Plot additional benefit
-x_pos_simple = np.arange(len(df))
-bars = ax2.bar(x_pos_simple, df['AIA_Additional_Benefit'], 
-               color='#e74c3c', alpha=0.8, edgecolor='black', linewidth=0.5)
-
-# Add value labels
-for i, (bar, value) in enumerate(zip(bars, df['AIA_Additional_Benefit'])):
-    ax2.text(bar.get_x() + bar.get_width()/2, value + 0.2, f'{value:.1f}%', 
-             ha='center', va='bottom', fontsize=9, fontweight='bold')
-
-# Customize secondary plot
-ax2.set_ylabel('Additional Improvement with AIA (%)', fontsize=12, fontweight='bold')
-ax2.set_xlabel('Configuration', fontsize=12, fontweight='bold')
-ax2.set_title('Additional Performance Benefit of AIA over Baseline\n(AIA improvement - Without AIA improvement)', 
-              fontsize=14, fontweight='bold', pad=20)
-
-# Set x-axis labels
-x_labels = [f"{row['Dataset']}\n{row['Model']}" for _, row in df.iterrows()]
-ax2.set_xticks(x_pos_simple)
-ax2.set_xticklabels(x_labels, fontsize=9, rotation=45, ha='right')
-
-# Add grid and horizontal reference line
-ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
-ax2.axhline(y=0, color='black', linestyle='-', alpha=0.8, linewidth=1)
-
-# Set y-axis limits
-max_benefit = df['AIA_Additional_Benefit'].max()
-ax2.set_ylim(0, max_benefit * 1.2)
-
-plt.tight_layout()
-plt.show()
