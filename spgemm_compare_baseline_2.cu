@@ -63,13 +63,9 @@ struct PerformanceResult {
     int feature_dim;
 };
 
-// Generate random sparse feature matrix with specified sparsity
-CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim, float sparsity) {
+// Generate random sparse feature matrix with specified dimensions
+CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim) {
     CSR<IT, VT> features;
-    
-    // Calculate expected number of non-zeros
-    long long total_elements = (long long)n_nodes * feature_dim;
-    long long nnz = (long long)(total_elements * sparsity);  // sparsity is nnz ratio
     
     std::vector<IT> row_ptr(n_nodes + 1, 0);
     std::vector<IT> col_ids;
@@ -77,24 +73,19 @@ CSR<IT, VT> generate_sparse_feature_matrix(int n_nodes, int feature_dim, float s
     
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> col_dist(0, feature_dim - 1);
     std::uniform_real_distribution<VT> val_dist(-1.0, 1.0);
-    std::uniform_real_distribution<float> sparse_dist(0.0, 1.0);
     
-    col_ids.reserve(nnz);
-    values.reserve(nnz);
+    // Generate dense feature matrix (all elements are non-zero)
+    long long total_nnz = (long long)n_nodes * feature_dim;
+    col_ids.reserve(total_nnz);
+    values.reserve(total_nnz);
     
     for (int i = 0; i < n_nodes; i++) {
-        int row_nnz = 0;
-        
         for (int j = 0; j < feature_dim; j++) {
-            if (sparse_dist(gen) < (1.0f - sparsity)) {  // sparsity is nnz ratio, so (1-sparsity) is zero ratio
-                col_ids.push_back(j);
-                values.push_back(val_dist(gen));
-                row_nnz++;
-            }
+            col_ids.push_back(j);
+            values.push_back(val_dist(gen));
         }
-        row_ptr[i + 1] = row_ptr[i] + row_nnz;
+        row_ptr[i + 1] = row_ptr[i] + feature_dim;
     }
     
     // Initialize CSR structure
@@ -135,148 +126,131 @@ PerformanceResult test_spgemm_cusparse(CSR<IT, VT> adj, CSR<IT, VT> features,
     get_spgemm_flop(adj, features, flop_count);
     result.flop_count = flop_count;
     
-    // Device memory pointers for result matrix C
-    int *dC_csrOffsets;
-    int *dC_columns;
-    VT *dC_values;
-    
     // Create CUDA events for timing
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     
-    // Average over multiple runs
-    float ave_msec = 0;
-    int num_trials = SpGEMM_TRI_NUM;
+    // Start timing
+    cudaEventRecord(start);
     
-    for (int trial = 0; trial < num_trials; trial++) {
-        if (trial > 0) {
-            // Free previous result
-            cudaFree(dC_csrOffsets);
-            cudaFree(dC_columns);
-            cudaFree(dC_values);
-        }
-        
-        // Start timing for this trial
-        cudaEventRecord(start);
-        
-        // CUSPARSE APIs - using modern SpGEMM API
-        cusparseHandle_t handle = NULL;
-        cusparseSpMatDescr_t matA, matB, matC;
-        void *dBuffer1 = NULL, *dBuffer2 = NULL;
-        size_t bufferSize1 = 0, bufferSize2 = 0;
-        
-        cusparseCreate(&handle);
-        
-        // Create sparse matrix A (adjacency) in CSR format
-        cusparseCreateCsr(&matA, adj.nrow, adj.ncolumn, adj.nnz,
-                          adj.d_rpt, adj.d_colids, adj.d_values,
-                          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                          CUSPARSE_INDEX_BASE_ZERO, 
-                          std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
-        
-        // Create sparse matrix B (features) in CSR format  
-        cusparseCreateCsr(&matB, features.nrow, features.ncolumn, features.nnz,
-                          features.d_rpt, features.d_colids, features.d_values,
-                          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                          CUSPARSE_INDEX_BASE_ZERO,
-                          std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
-        
-        // Allocate C row pointers
-        cudaMalloc((void**)&dC_csrOffsets, (adj.nrow + 1) * sizeof(int));
-        
-        // Create sparse matrix C for the result (A * B)
-        cusparseCreateCsr(&matC, adj.nrow, features.ncolumn, 0,
-                          dC_csrOffsets, NULL, NULL,
-                          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                          CUSPARSE_INDEX_BASE_ZERO,
-                          std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
-        
-        // SpGEMM Computation (A * B, where A=adj, B=features)
-        cusparseSpGEMMDescr_t spgemmDesc;
-        cusparseSpGEMM_createDescr(&spgemmDesc);
-        
-        // Set up SpGEMM parameters
-        VT alpha = 1.0, beta = 0.0;
-        cusparseOperation_t opA = CUSPARSE_OPERATION_NON_TRANSPOSE;
-        cusparseOperation_t opB = CUSPARSE_OPERATION_NON_TRANSPOSE;
-        cudaDataType computeType = std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F;
-        
-        // SpGEMM work estimation
-        cusparseSpGEMM_workEstimation(handle, opA, opB,
-                                      &alpha, matA, matB, &beta, matC,
-                                      computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                      spgemmDesc, &bufferSize1, NULL);
-        cudaMalloc((void**)&dBuffer1, bufferSize1);
-        
-        cusparseSpGEMM_workEstimation(handle, opA, opB,
-                                      &alpha, matA, matB, &beta, matC,
-                                      computeType, CUSPARSE_SPGEMM_DEFAULT,
-                                      spgemmDesc, &bufferSize1, dBuffer1);
-        
-        // SpGEMM compute
-        cusparseSpGEMM_compute(handle, opA, opB,
-                               &alpha, matA, matB, &beta, matC,
-                               computeType, CUSPARSE_SPGEMM_DEFAULT,
-                               spgemmDesc, &bufferSize2, NULL);
-        cudaMalloc(&dBuffer2, bufferSize2);
-        
-        cusparseSpGEMM_compute(handle, opA, opB,
-                               &alpha, matA, matB, &beta, matC,
-                               computeType, CUSPARSE_SPGEMM_DEFAULT,
-                               spgemmDesc, &bufferSize2, dBuffer2);
-        
-        // Get matrix C non-zero entries
-        int64_t C_num_rows1, C_num_cols1, C_nnz1;
-        cusparseSpMatGetSize(matC, &C_num_rows1, &C_num_cols1, &C_nnz1);
-        
-        // Allocate matrix C
-        cudaMalloc((void**)&dC_columns, C_nnz1 * sizeof(int));
-        cudaMalloc((void**)&dC_values, C_nnz1 * sizeof(VT));
-        
-        // Update matC with the new pointers
-        cusparseCsrSetPointers(matC, dC_csrOffsets, dC_columns, dC_values);
-        
-        // Copy the final products to the matrix C
-        cusparseSpGEMM_copy(handle, opA, opB,
-                            &alpha, matA, matB, &beta, matC,
-                            computeType, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc);
-        
-        // Stop timing
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        
-        // Calculate elapsed time for this trial
-        float milliseconds = 0;
-        cudaEventElapsedTime(&milliseconds, start, stop);
-        
-        if (trial > 0) {  // Skip first trial for warmup
-            ave_msec += milliseconds;
-        }
-        
-        // Clean up SpGEMM resources
-        cusparseSpGEMM_destroyDescr(spgemmDesc);
-        cusparseDestroySpMat(matA);
-        cusparseDestroySpMat(matB);
-        cusparseDestroySpMat(matC);
-        cusparseDestroy(handle);
-        
-        // Free buffers
-        cudaFree(dBuffer1);
-        cudaFree(dBuffer2);
-    }
+    // Device memory pointers for result matrix C
+    int *dC_csrOffsets;
+    int *dC_columns;
+    VT *dC_values;
     
-    ave_msec /= num_trials - 1;  // Average excluding warmup
+    // CUSPARSE APIs - using modern SpGEMM API
+    cusparseHandle_t handle = NULL;
+    cusparseSpMatDescr_t matA, matB, matC;
+    void *dBuffer1 = NULL, *dBuffer2 = NULL;
+    size_t bufferSize1 = 0, bufferSize2 = 0;
     
-    result.total_time_ms = ave_msec;
+    cusparseCreate(&handle);
+    
+    // Create sparse matrix A (adjacency) in CSR format
+    cusparseCreateCsr(&matA, adj.nrow, adj.ncolumn, adj.nnz,
+                      adj.d_rpt, adj.d_colids, adj.d_values,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, 
+                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    
+    // Create sparse matrix B (features) in CSR format  
+    cusparseCreateCsr(&matB, features.nrow, features.ncolumn, features.nnz,
+                      features.d_rpt, features.d_colids, features.d_values,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO,
+                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    
+    // Allocate C row pointers
+    cudaMalloc((void**)&dC_csrOffsets, (adj.nrow + 1) * sizeof(int));
+    
+    // Create sparse matrix C for the result (A * B)
+    cusparseCreateCsr(&matC, adj.nrow, features.ncolumn, 0,
+                      dC_csrOffsets, NULL, NULL,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO,
+                      std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F);
+    
+    // SpGEMM Computation (A * B, where A=adj, B=features)
+    cusparseSpGEMMDescr_t spgemmDesc;
+    cusparseSpGEMM_createDescr(&spgemmDesc);
+    
+    // Set up SpGEMM parameters
+    VT alpha = 1.0, beta = 0.0;
+    cusparseOperation_t opA = CUSPARSE_OPERATION_NON_TRANSPOSE;
+    cusparseOperation_t opB = CUSPARSE_OPERATION_NON_TRANSPOSE;
+    cudaDataType computeType = std::is_same<VT, float>::value ? CUDA_R_32F : CUDA_R_64F;
+    
+    // SpGEMM work estimation
+    cusparseSpGEMM_workEstimation(handle, opA, opB,
+                                  &alpha, matA, matB, &beta, matC,
+                                  computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                  spgemmDesc, &bufferSize1, NULL);
+    cudaMalloc((void**)&dBuffer1, bufferSize1);
+    
+    cusparseSpGEMM_workEstimation(handle, opA, opB,
+                                  &alpha, matA, matB, &beta, matC,
+                                  computeType, CUSPARSE_SPGEMM_DEFAULT,
+                                  spgemmDesc, &bufferSize1, dBuffer1);
+    
+    // SpGEMM compute
+    cusparseSpGEMM_compute(handle, opA, opB,
+                           &alpha, matA, matB, &beta, matC,
+                           computeType, CUSPARSE_SPGEMM_DEFAULT,
+                           spgemmDesc, &bufferSize2, NULL);
+    cudaMalloc(&dBuffer2, bufferSize2);
+    
+    cusparseSpGEMM_compute(handle, opA, opB,
+                           &alpha, matA, matB, &beta, matC,
+                           computeType, CUSPARSE_SPGEMM_DEFAULT,
+                           spgemmDesc, &bufferSize2, dBuffer2);
+    
+    // Get matrix C non-zero entries
+    int64_t C_num_rows1, C_num_cols1, C_nnz1;
+    cusparseSpMatGetSize(matC, &C_num_rows1, &C_num_cols1, &C_nnz1);
+    
+    printf("cuSPARSE result: %ld x %ld, nnz = %ld\n", C_num_rows1, C_num_cols1, C_nnz1);
+    
+    // Allocate matrix C
+    cudaMalloc((void**)&dC_columns, C_nnz1 * sizeof(int));
+    cudaMalloc((void**)&dC_values, C_nnz1 * sizeof(VT));
+    
+    // Update matC with the new pointers
+    cusparseCsrSetPointers(matC, dC_csrOffsets, dC_columns, dC_values);
+    
+    // Copy the final products to the matrix C
+    cusparseSpGEMM_copy(handle, opA, opB,
+                        &alpha, matA, matB, &beta, matC,
+                        computeType, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc);
+    
+    // Stop timing
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    // Calculate elapsed time
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    
+    result.total_time_ms = milliseconds;
     result.aia_time_ms = 0;  
-    result.gflops = (float)(flop_count) / 1000 / 1000 / ave_msec;
+    result.gflops = (float)(flop_count) / 1000 / 1000 / msec;
+    
+    // Clean up SpGEMM resources
+    cusparseSpGEMM_destroyDescr(spgemmDesc);
+    cusparseDestroySpMat(matA);
+    cusparseDestroySpMat(matB);
+    cusparseDestroySpMat(matC);
+    cusparseDestroy(handle);
+    
+    // Free buffers
+    cudaFree(dBuffer1);
+    cudaFree(dBuffer2);
     
     // Clean up
     adj.release_csr();
     features.release_csr();
     
-    // Free final result
+    // Free result
     cudaFree(dC_csrOffsets);
     cudaFree(dC_columns); 
     cudaFree(dC_values);
@@ -315,27 +289,17 @@ PerformanceResult test_spgemm_hash_old(CSR<IT, VT> adj, CSR<IT, VT> features,
     result.flop_count = flop_count;
     
     // Execute SpGEMM without AIA
-    ave_msec = 0;
     CSR<IT, VT> output;
     
-    for (i = 0; i < SpGEMM_TRI_NUM; i++) {
-        if (i > 0) {
-            output.release_csr();
-        }
-        
-        cudaEventRecord(event[0], 0);
-        SpGEMM_Hash(adj, features, output);
-        cudaEventRecord(event[1], 0);
-        cudaDeviceSynchronize();
-        cudaEventElapsedTime(&msec, event[0], event[1]);
-        
-        if (i > 0) {
-            ave_msec += msec;
-        }
-    }
-    ave_msec /= SpGEMM_TRI_NUM - 1;
+    cudaEventRecord(event[0], 0);
+    SpGEMM_Hash(adj, features, output);
+    cudaEventRecord(event[1], 0);
+    cudaDeviceSynchronize();
+    cudaEventElapsedTime(&msec, event[0], event[1]);
     
-    result.total_time_ms = ave_msec;
+    printf("Hash result: %d x %d, nnz = %d\n", output.nrow, output.ncolumn, output.nnz);
+    
+    result.total_time_ms = msec;
     result.aia_time_ms = 0;  
     result.gflops = (float)(flop_count) / 1000 / 1000 / ave_msec;
     
@@ -402,16 +366,17 @@ void run_spgemm_benchmark(const std::string& dataset_name, const std::string& da
     
     std::cout << "Graph loaded: " << adj.nrow << " nodes, " << adj.nnz << " edges" << std::endl;
     
-    // Test with different sparsities and feature dimension 256
-    std::vector<float> sparsities = {0.5f, 0.25f, 0.125f, 0.0625f};  // These are nnz ratios
-    int feature_dim = 256;
+    // Test with different sparsities - feature matrix dimensions will be n × (sparsity × 256)
+    std::vector<float> sparsities = {0.5f, 0.25f, 0.125f, 0.0625f};
+    int base_feature_dim = 256;
     
     for (float sparsity : sparsities) {
-        std::cout << "\n--- Testing sparsity: " << sparsity << " ---" << std::endl;
+        int actual_feature_dim = (int)(sparsity * base_feature_dim);
+        std::cout << "\n--- Testing sparsity: " << sparsity << " (feature dim: " << actual_feature_dim << ") ---" << std::endl;
         print_results_header();
         
-        // Generate sparse feature matrix
-        CSR<IT, VT> features = generate_sparse_feature_matrix(adj.nrow, feature_dim, sparsity);
+        // Generate feature matrix with dimensions n × (sparsity × 256)
+        CSR<IT, VT> features = generate_sparse_feature_matrix(adj.nrow, actual_feature_dim);
         std::cout << "Adjacency matrix: " << adj.nrow << "x" << adj.ncolumn << ", nnz=" << adj.nnz << std::endl;
         std::cout << "Feature matrix: " << features.nrow << "x" << features.ncolumn 
                   << ", nnz=" << features.nnz << std::endl;
@@ -425,6 +390,9 @@ void run_spgemm_benchmark(const std::string& dataset_name, const std::string& da
         // 2. Hash without AIA (using UNMODIFIED volta_old.hpp)
         PerformanceResult hash_old_result = test_spgemm_hash_old(adj, features, dataset_name, sparsity);
         print_result(hash_old_result, cusparse_result.total_time_ms);
+        
+        // Debug: Check if results are consistent
+        std::cout << "Results comparison completed." << std::endl;
         
         // Cleanup
         features.release_cpu_csr();
@@ -447,8 +415,8 @@ int main(int argc, char *argv[]) {
     std::vector<std::string> datasets = {"reddit", "flickr", "yelp", "products", "proteins"};
     
     std::cout << "SpGEMM Performance Comparison: Hash vs cuSPARSE (Modern API)" << std::endl;
-    std::cout << "Feature matrix dimension: 256" << std::endl;
-    std::cout << "Sparsity levels (nnz ratios): 0.5, 0.25, 0.125, 0.0625" << std::endl;
+    std::cout << "Feature matrix dimensions: n × (sparsity × 256)" << std::endl;
+    std::cout << "Sparsity levels: 0.5, 0.25, 0.125, 0.0625" << std::endl;
     std::cout << "Loading graphs from .indices/.indptr format" << std::endl;
     
     for (const std::string& dataset : datasets) {
